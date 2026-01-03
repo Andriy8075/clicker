@@ -113,15 +113,18 @@ class Target:
     def make_editable(self):
         """Make target editable and visible."""
         self.is_editing = True
+        # Show the window and make it fully visible
+        self.window.deiconify()
         self.window.wm_attributes('-alpha', 1.0)  # Fully opaque
         self._draw_target()
     
     def make_readonly(self):
-        """Make target read-only and semi-transparent."""
+        """Make target read-only and completely invisible (click-through)."""
         self.is_editing = False
-        self.window.wm_attributes('-alpha', 0.5)  # Semi-transparent
-        # Note: Click-through requires platform-specific code, keeping visible but semi-transparent
-        self._draw_target()
+        # Make completely invisible (0 opacity) and click-through
+        self.window.wm_attributes('-alpha', 0.0)  # Completely transparent
+        # Hide the window to make it truly click-through
+        self.window.withdraw()
     
     def update_number(self, number: int):
         """Update the target number."""
@@ -290,16 +293,35 @@ class AutoclickerApp:
         scrollbar = ttk.Scrollbar(self.scripts_frame, orient="vertical", command=self.canvas.yview)
         self.scrollable_frame = tk.Frame(self.canvas)
         
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        )
+        def update_scrollregion(event=None):
+            """Update the scroll region when content changes."""
+            self.canvas.update_idletasks()
+            bbox = self.canvas.bbox("all")
+            if bbox:
+                self.canvas.configure(scrollregion=bbox)
         
-        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.scrollable_frame.bind("<Configure>", update_scrollregion)
+        
+        # Bind mouse wheel to canvas
+        def on_mousewheel(event):
+            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        self.canvas.bind_all("<MouseWheel>", on_mousewheel)
+        
         self.canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Update canvas window width when canvas resizes
+        def configure_canvas_window(event):
+            canvas_width = event.width
+            self.canvas.itemconfig(self.canvas_window_id, width=canvas_width)
+        
+        self.canvas.bind('<Configure>', configure_canvas_window)
         
         self.canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+        
+        # Store canvas window ID for later updates
+        self.canvas_window_id = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
     
     def _add_script(self):
         """Add a new script."""
@@ -316,6 +338,16 @@ class AutoclickerApp:
         # Create UI for each script
         for script in self.scripts:
             self._create_script_ui(script)
+        
+        # Update scroll region after UI is updated
+        self.root.after_idle(self._update_scroll_region)
+    
+    def _update_scroll_region(self):
+        """Update the scroll region of the canvas."""
+        self.canvas.update_idletasks()
+        bbox = self.canvas.bbox("all")
+        if bbox:
+            self.canvas.configure(scrollregion=bbox)
     
     def _create_script_ui(self, script: Script):
         """Create UI for a single script."""
@@ -327,7 +359,14 @@ class AutoclickerApp:
         header_frame = tk.Frame(script.frame)
         header_frame.pack(fill='x', pady=5)
         
-        tk.Label(header_frame, text=script.name, font=('Arial', 12, 'bold')).pack(side='left')
+        tk.Label(header_frame, text="Name:", font=('Arial', 10)).pack(side='left', padx=(0, 5))
+        
+        # Editable name entry
+        script.name_var = tk.StringVar(value=script.name)
+        name_entry = tk.Entry(header_frame, textvariable=script.name_var, font=('Arial', 12, 'bold'), width=20)
+        name_entry.pack(side='left', padx=5)
+        name_entry.bind('<FocusOut>', lambda e, s=script: self._update_script_name(s))
+        name_entry.bind('<Return>', lambda e, s=script: self._update_script_name(s))
         
         # Buttons frame
         buttons_frame = tk.Frame(script.frame)
@@ -408,9 +447,19 @@ class AutoclickerApp:
         except ValueError:
             var.set(str(target.delay_ms))
     
+    def _update_script_name(self, script: Script):
+        """Update script name from input."""
+        new_name = script.name_var.get().strip()
+        if new_name:
+            script.name = new_name
+        else:
+            # If empty, restore old name
+            script.name_var.set(script.name)
+    
     def _delete_target(self, script: Script, target: Target):
         """Delete a target from a script."""
         script.remove_target(target)
+        self.root.after_idle(self._update_scroll_region)
     
     def _toggle_edit_script(self, script: Script):
         """Toggle edit mode for a script."""
@@ -442,33 +491,40 @@ class AutoclickerApp:
         """Add a target to a script."""
         script.add_target()
         self._update_script_ui(script)
+        self.root.after_idle(self._update_scroll_region)
     
     def _set_keybind(self, script: Script):
         """Set keybind for a script."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Set Keybind")
-        dialog.geometry("450x250")
+        dialog.geometry("400x200")
         dialog.transient(self.root)
         dialog.grab_set()
         
-        tk.Label(dialog, text="Enter key combination (e.g., 'ctrl+alt+p' or 'alt+p'):", 
-                font=('Arial', 10)).pack(pady=15)
-        
-        entry_frame = tk.Frame(dialog)
-        entry_frame.pack(pady=10)
-        
-        manual_entry = tk.Entry(entry_frame, width=35, font=('Arial', 11))
-        manual_entry.pack(side='left', padx=5)
-        if script.keybind:
-            manual_entry.insert(0, '+'.join(script.keybind))
+        tk.Label(dialog, text="Click 'Capture Keys' and press your key combination", 
+                font=('Arial', 10)).pack(pady=20)
         
         captured_keys_list = []
         hook_ref = [None]
+        capture_active = [False]
+        
+        # Display current keybind if exists
+        current_keybind_label = tk.Label(dialog, text="", font=('Arial', 9), fg='gray')
+        current_keybind_label.pack(pady=5)
+        if script.keybind:
+            current_keybind_label.config(text=f"Current: {self._format_keybind(script.keybind)}")
+        
+        # Display captured keys
+        status_label = tk.Label(dialog, text="", font=('Arial', 12, 'bold'))
+        status_label.pack(pady=15)
         
         def capture_keys():
             """Capture keys using keyboard library."""
-            manual_entry.config(state='disabled')
-            status_label.config(text="Press your key combination now... (Press ESC to finish)", fg='blue')
+            if capture_active[0]:
+                return  # Already capturing
+            
+            capture_active[0] = True
+            status_label.config(text="Press your key combination now...\n(Press ESC to finish)", fg='blue')
             dialog.update()
             captured_keys_list.clear()
             
@@ -487,61 +543,77 @@ class AutoclickerApp:
                     
                     # Skip if already captured or if it's esc
                     if mapped_key == 'esc':
-                        stop_capture()
+                        # Schedule stop_capture in main thread
+                        try:
+                            dialog.after(0, stop_capture)
+                        except:
+                            pass
                         return
                     
                     if mapped_key not in captured_keys_list:
                         captured_keys_list.append(mapped_key)
-                        status_label.config(text=" + ".join([k.capitalize() for k in captured_keys_list]), fg='green')
+                        # Schedule UI update in main thread
+                        def update_ui():
+                            try:
+                                if status_label.winfo_exists():
+                                    status_label.config(text=" + ".join([k.capitalize() for k in captured_keys_list]), fg='green')
+                            except:
+                                pass
+                        try:
+                            dialog.after(0, update_ui)
+                        except:
+                            pass
             
             def stop_capture():
-                if hook_ref[0] is not None:
-                    keyboard.unhook(hook_ref[0])
-                    hook_ref[0] = None
-                manual_entry.config(state='normal')
-                if captured_keys_list:
-                    manual_entry.delete(0, tk.END)
-                    manual_entry.insert(0, '+'.join(captured_keys_list))
-                    status_label.config(text="Keys captured! Click OK to save.", fg='green')
-                else:
-                    status_label.config(text="No keys captured. Try again or enter manually.", fg='orange')
+                try:
+                    if hook_ref[0] is not None:
+                        keyboard.unhook(hook_ref[0])
+                        hook_ref[0] = None
+                    capture_active[0] = False
+                    
+                    if status_label.winfo_exists():
+                        if captured_keys_list:
+                            status_label.config(text="Keys captured: " + " + ".join([k.capitalize() for k in captured_keys_list]), fg='green')
+                            # Automatically save and close
+                            script.keybind = captured_keys_list.copy()
+                            self._update_scripts_ui()
+                            dialog.after(1000, dialog.destroy)  # Close after 1 second
+                        else:
+                            status_label.config(text="No keys captured. Try again.", fg='orange')
+                except:
+                    pass
             
             # Hook keyboard events
             hook_ref[0] = keyboard.on_press(on_press)
             
-            # Stop button
-            def stop_capture_btn():
-                stop_capture()
-            
-            stop_btn = tk.Button(entry_frame, text="Stop", command=stop_capture_btn)
-            stop_btn.pack(side='left', padx=5)
-            
             # Auto-stop after 15 seconds
             dialog.after(15000, stop_capture)
         
-        status_label = tk.Label(dialog, text="", font=('Arial', 10))
-        status_label.pack(pady=10)
-        
         button_frame = tk.Frame(dialog)
-        button_frame.pack(pady=15)
+        button_frame.pack(pady=20)
         
-        tk.Button(button_frame, text="Capture Keys", command=capture_keys, width=15).pack(side='left', padx=5)
+        capture_btn = tk.Button(button_frame, text="Capture Keys", command=capture_keys, width=15)
+        capture_btn.pack(side='left', padx=5)
         
-        def use_manual():
-            text = manual_entry.get().strip().lower()
-            if text:
-                keys = [k.strip() for k in text.split('+')]
-                script.keybind = keys
+        def stop_capture_btn():
+            if hook_ref[0] is not None:
+                try:
+                    keyboard.unhook(hook_ref[0])
+                    hook_ref[0] = None
+                except:
+                    pass
+            capture_active[0] = False
+            if captured_keys_list:
+                script.keybind = captured_keys_list.copy()
                 self._update_scripts_ui()
                 dialog.destroy()
             else:
-                status_label.config(text="Please enter a key combination", fg='red')
+                status_label.config(text="No keys captured.", fg='orange')
         
-        tk.Button(button_frame, text="OK", command=use_manual, width=15).pack(side='left', padx=5)
+        stop_btn = tk.Button(button_frame, text="Stop", command=stop_capture_btn, width=15)
+        stop_btn.pack(side='left', padx=5)
+        
         tk.Button(button_frame, text="Cancel", command=dialog.destroy, width=15).pack(side='left', padx=5)
-        
-        manual_entry.focus_set()
-        manual_entry.bind('<Return>', lambda e: use_manual())
     
     def _format_keybind(self, keybind: List[str]) -> str:
         """Format keybind for display."""
