@@ -161,6 +161,8 @@ class Script:
         self.is_editing = False
         self.frame = None
         self.target_frame = None
+        self.return_mouse = False
+        self.return_delay_ms = 500
     
     def add_target(self, x: int = None, y: int = None, delay_ms: int = 500) -> Target:
         """Add a new target to the script."""
@@ -208,6 +210,8 @@ class Script:
     def duplicate(self) -> 'Script':
         """Create a duplicate of this script."""
         new_script = Script(self.parent, f"{self.name} (Copy)")
+        new_script.return_mouse = self.return_mouse
+        new_script.return_delay_ms = self.return_delay_ms
         for target in self.targets:
             x, y = target.get_position()
             new_script.add_target(x, y, target.delay_ms)
@@ -218,17 +222,30 @@ class Script:
         if not self.targets:
             return
         
+        # Save starting mouse position if return is enabled
+        start_x, start_y = None, None
+        if self.return_mouse:
+            start_x, start_y = pyautogui.position()
+        
+        # Click all targets
         for target in self.targets:
             x, y = target.get_position()
             time.sleep(target.delay_ms / 1000.0)  # Convert ms to seconds
             pyautogui.click(x, y)
+        
+        # Return mouse to starting position if enabled
+        if self.return_mouse and start_x is not None and start_y is not None:
+            time.sleep(self.return_delay_ms / 1000.0)  # Wait before returning
+            pyautogui.moveTo(start_x, start_y)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert script to dictionary for JSON serialization."""
         return {
             'name': self.name,
             'keybind': self.keybind,
-            'targets': [target.to_dict() for target in self.targets]
+            'targets': [target.to_dict() for target in self.targets],
+            'return_mouse': self.return_mouse,
+            'return_delay_ms': self.return_delay_ms
         }
     
     @classmethod
@@ -236,6 +253,8 @@ class Script:
         """Create script from dictionary."""
         script = cls(parent, data.get('name', 'Script'))
         script.keybind = data.get('keybind', [])
+        script.return_mouse = data.get('return_mouse', False)
+        script.return_delay_ms = data.get('return_delay_ms', 500)
         for target_data in data.get('targets', []):
             script.add_target(
                 target_data.get('x', 100),
@@ -397,6 +416,16 @@ class AutoclickerApp:
         tk.Button(buttons_frame, text="Duplicate", 
                  command=lambda s=script: self._duplicate_script(s)).pack(side='left', padx=5)
         
+        # Return checkbox
+        return_check_frame = tk.Frame(script.frame)
+        return_check_frame.pack(fill='x', pady=5)
+        
+        script.return_var = tk.BooleanVar(value=script.return_mouse)
+        return_checkbox = tk.Checkbutton(return_check_frame, text="Return", 
+                                        variable=script.return_var,
+                                        command=lambda s=script: self._toggle_return(s))
+        return_checkbox.pack(side='left', padx=5)
+        
         # Targets list
         targets_label = tk.Label(script.frame, text="Targets:", font=('Arial', 10))
         targets_label.pack(anchor='w', pady=(10, 5))
@@ -426,6 +455,13 @@ class AutoclickerApp:
                                 try:
                                     delay = int(entry_value)
                                     target.delay_ms = delay
+                                except ValueError:
+                                    pass
+                            # Check if this is the return delay entry
+                            elif hasattr(child, '_return_delay_ref'):
+                                try:
+                                    delay = int(entry_value)
+                                    script.return_delay_ms = delay
                                 except ValueError:
                                     pass
                         except:
@@ -465,6 +501,23 @@ class AutoclickerApp:
             tk.Button(target_row, text="Delete", 
                      command=lambda t=target: self._delete_target(script, t)).pack(side='left', padx=5)
         
+        # Return delay field (only visible when return is enabled)
+        if script.return_var.get():
+            return_delay_frame = tk.Frame(script.target_frame)
+            return_delay_frame.pack(fill='x', pady=5)
+            
+            tk.Label(return_delay_frame, text="Return delay:", font=('Arial', 10)).pack(side='left', padx=5)
+            
+            return_delay_var = tk.StringVar(value=str(script.return_delay_ms))
+            return_delay_entry = tk.Entry(return_delay_frame, textvariable=return_delay_var, width=10)
+            # Mark this as return delay entry for saving
+            return_delay_entry._return_delay_ref = True
+            return_delay_entry.pack(side='left', padx=5)
+            return_delay_entry.bind('<FocusOut>', lambda e, s=script, v=return_delay_var: self._update_return_delay(s, v))
+            return_delay_entry.bind('<Return>', lambda e, s=script, v=return_delay_var: self._update_return_delay(s, v))
+            
+            tk.Label(return_delay_frame, text="ms", font=('Arial', 10)).pack(side='left', padx=5)
+        
         # Update keybind button text
         if script.frame:
             for widget in script.frame.winfo_children():
@@ -490,6 +543,20 @@ class AutoclickerApp:
         else:
             # If empty, restore old name
             script.name_var.set(script.name)
+    
+    def _toggle_return(self, script: Script):
+        """Toggle return mouse checkbox."""
+        script.return_mouse = script.return_var.get()
+        # Update UI to show/hide return delay field
+        self._update_script_ui(script)
+    
+    def _update_return_delay(self, script: Script, var: tk.StringVar):
+        """Update return delay from input."""
+        try:
+            delay = int(var.get())
+            script.return_delay_ms = delay
+        except ValueError:
+            var.set(str(script.return_delay_ms))
     
     def _delete_target(self, script: Script, target: Target):
         """Delete a target from a script."""
