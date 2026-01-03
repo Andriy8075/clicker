@@ -370,7 +370,7 @@ class AutoclickerApp:
         
         # Save button for script name
         save_name_btn = tk.Button(header_frame, text="Save Name", command=lambda s=script: self._update_script_name(s), 
-                                 width=8, font=('Arial', 9))
+                                 width=12, font=('Arial', 9))
         save_name_btn.pack(side='left', padx=5)
         
         # Buttons frame
@@ -502,16 +502,20 @@ class AutoclickerApp:
         """Set keybind for a script."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Set Keybind")
-        dialog.geometry("400x200")
+        dialog.geometry("500x400")
         dialog.transient(self.root)
         dialog.grab_set()
         
-        tk.Label(dialog, text="Click 'Capture Keys' and press your key combination", 
-                font=('Arial', 10)).pack(pady=20)
+        # Use a label with wraplength to ensure text fits
+        instruction_label = tk.Label(dialog, 
+                                    text="Press your key combination now", 
+                                    font=('Arial', 10), 
+                                    wraplength=450,
+                                    justify='center')
+        instruction_label.pack(pady=20)
         
         captured_keys_list = []
         hook_ref = [None]
-        capture_active = [False]
         
         # Display current keybind if exists
         current_keybind_label = tk.Label(dialog, text="", font=('Arial', 9), fg='gray')
@@ -520,105 +524,76 @@ class AutoclickerApp:
             current_keybind_label.config(text=f"Current: {self._format_keybind(script.keybind)}")
         
         # Display captured keys
-        status_label = tk.Label(dialog, text="", font=('Arial', 12, 'bold'))
+        status_label = tk.Label(dialog, text="Waiting for keypress...", font=('Arial', 12, 'bold'), fg='blue')
         status_label.pack(pady=15)
         
-        def capture_keys():
-            """Capture keys using keyboard library."""
-            if capture_active[0]:
-                return  # Already capturing
-            
-            capture_active[0] = True
-            status_label.config(text="Press your key combination now...\n(Press ESC to finish)", fg='blue')
-            dialog.update()
-            captured_keys_list.clear()
-            
-            def on_press(event):
-                if event.event_type == 'down':
-                    key_name = event.name.lower()
-                    # Map common key names
-                    key_map = {
-                        'left ctrl': 'ctrl', 'right ctrl': 'ctrl',
-                        'left alt': 'alt', 'right alt': 'alt',
-                        'left shift': 'shift', 'right shift': 'shift',
-                        'left windows': 'windows', 'right windows': 'windows',
-                        'left win': 'windows', 'right win': 'windows'
-                    }
-                    mapped_key = key_map.get(key_name, key_name)
-                    
-                    # Skip if already captured or if it's esc
-                    if mapped_key == 'esc':
-                        # Schedule stop_capture in main thread
+        def on_press(event):
+            if event.event_type == 'down':
+                key_name = event.name.lower()
+                # Map common key names
+                key_map = {
+                    'left ctrl': 'ctrl', 'right ctrl': 'ctrl',
+                    'left alt': 'alt', 'right alt': 'alt',
+                    'left shift': 'shift', 'right shift': 'shift',
+                    'left windows': 'windows', 'right windows': 'windows',
+                    'left win': 'windows', 'right win': 'windows'
+                }
+                mapped_key = key_map.get(key_name, key_name)
+                
+                # Skip if already captured
+                if mapped_key not in captured_keys_list:
+                    captured_keys_list.append(mapped_key)
+                    # Schedule UI update in main thread
+                    def update_ui():
                         try:
-                            dialog.after(0, stop_capture)
+                            if status_label.winfo_exists():
+                                status_label.config(text=" + ".join([k.capitalize() for k in captured_keys_list]), fg='green')
                         except:
                             pass
-                        return
-                    
-                    if mapped_key not in captured_keys_list:
-                        captured_keys_list.append(mapped_key)
-                        # Schedule UI update in main thread
-                        def update_ui():
-                            try:
-                                if status_label.winfo_exists():
-                                    status_label.config(text=" + ".join([k.capitalize() for k in captured_keys_list]), fg='green')
-                            except:
-                                pass
-                        try:
-                            dialog.after(0, update_ui)
-                        except:
-                            pass
-            
-            def stop_capture():
-                try:
-                    if hook_ref[0] is not None:
-                        keyboard.unhook(hook_ref[0])
-                        hook_ref[0] = None
-                    capture_active[0] = False
-                    
-                    if status_label.winfo_exists():
-                        if captured_keys_list:
-                            status_label.config(text="Keys captured: " + " + ".join([k.capitalize() for k in captured_keys_list]), fg='green')
-                            # Automatically save and close
-                            script.keybind = captured_keys_list.copy()
-                            self._update_scripts_ui()
-                            dialog.after(1000, dialog.destroy)  # Close after 1 second
-                        else:
-                            status_label.config(text="No keys captured. Try again.", fg='orange')
-                except:
-                    pass
-            
-            # Hook keyboard events
-            hook_ref[0] = keyboard.on_press(on_press)
-            
-            # Auto-stop after 15 seconds
-            dialog.after(15000, stop_capture)
+                    try:
+                        dialog.after(0, update_ui)
+                    except:
+                        pass
         
-        button_frame = tk.Frame(dialog)
-        button_frame.pack(pady=20)
-        
-        capture_btn = tk.Button(button_frame, text="Capture Keys", command=capture_keys, width=15)
-        capture_btn.pack(side='left', padx=5)
-        
-        def stop_capture_btn():
-            if hook_ref[0] is not None:
-                try:
+        def cleanup():
+            """Clean up keyboard hook."""
+            try:
+                if hook_ref[0] is not None:
                     keyboard.unhook(hook_ref[0])
                     hook_ref[0] = None
-                except:
-                    pass
-            capture_active[0] = False
+            except:
+                pass
+        
+        def on_ok():
+            """Handle OK button click."""
+            cleanup()
             if captured_keys_list:
                 script.keybind = captured_keys_list.copy()
                 self._update_scripts_ui()
                 dialog.destroy()
             else:
-                status_label.config(text="No keys captured.", fg='orange')
+                status_label.config(text="No keys captured. Please press keys.", fg='orange')
         
-        stop_btn = tk.Button(button_frame, text="Stop", command=stop_capture_btn, width=15)
-        stop_btn.pack(side='left', padx=5)
+        def on_cancel():
+            """Handle Cancel button click."""
+            cleanup()
+            dialog.destroy()
         
-        tk.Button(button_frame, text="Cancel", command=dialog.destroy, width=15).pack(side='left', padx=5)
+        # Start capturing immediately
+        hook_ref[0] = keyboard.on_press(on_press)
+        
+        # Clean up on window close
+        def on_closing():
+            cleanup()
+            dialog.destroy()
+        
+        dialog.protocol("WM_DELETE_WINDOW", on_closing)
+        
+        button_frame = tk.Frame(dialog)
+        button_frame.pack(pady=20)
+        
+        tk.Button(button_frame, text="OK", command=on_ok, width=15).pack(side='left', padx=5)
+        tk.Button(button_frame, text="Cancel", command=on_cancel, width=15).pack(side='left', padx=5)
     
     def _format_keybind(self, keybind: List[str]) -> str:
         """Format keybind for display."""
