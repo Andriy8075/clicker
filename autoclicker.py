@@ -406,10 +406,38 @@ class AutoclickerApp:
         
         self._update_script_ui(script)
     
+    def _save_delay_values(self, script: Script):
+        """Save delay values from Entry fields before UI update."""
+        if not script.target_frame:
+            return
+        
+        # Find all Entry widgets and save their values
+        for widget in script.target_frame.winfo_children():
+            if isinstance(widget, tk.Frame):
+                # Look for Entry widgets in this row
+                for child in widget.winfo_children():
+                    if isinstance(child, tk.Entry):
+                        try:
+                            # Get the value from the Entry
+                            entry_value = child.get()
+                            # Get target reference stored in Entry widget
+                            if hasattr(child, '_target_ref'):
+                                target = child._target_ref
+                                try:
+                                    delay = int(entry_value)
+                                    target.delay_ms = delay
+                                except ValueError:
+                                    pass
+                        except:
+                            pass
+    
     def _update_script_ui(self, script: Script):
         """Update the targets list for a script."""
         if not script.target_frame:
             return
+        
+        # Save delay values from existing Entry fields before destroying them
+        self._save_delay_values(script)
         
         # Clear existing target entries
         for widget in script.target_frame.winfo_children():
@@ -425,6 +453,8 @@ class AutoclickerApp:
             # Delay input
             delay_var = tk.StringVar(value=str(target.delay_ms))
             delay_entry = tk.Entry(target_row, textvariable=delay_var, width=10)
+            # Store target reference in Entry widget for easy access
+            delay_entry._target_ref = target
             delay_entry.pack(side='left', padx=5)
             delay_entry.bind('<FocusOut>', lambda e, t=target, v=delay_var: self._update_target_delay(t, v))
             delay_entry.bind('<Return>', lambda e, t=target, v=delay_var: self._update_target_delay(t, v))
