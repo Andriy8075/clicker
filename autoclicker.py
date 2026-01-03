@@ -1,797 +1,724 @@
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 import pyautogui
 import json
 import threading
-import queue
-from pynput import keyboard
-from pynput.keyboard import Key, Listener
-import pystray
-from PIL import Image, ImageDraw
+import time
+import keyboard
+from typing import List, Dict, Optional, Tuple
 import sys
-import os
-
-# Windows API for click-through functionality
 try:
-    import ctypes
-    from ctypes import wintypes
-    WINDOWS = True
-    WS_EX_TRANSPARENT = 0x00000020
-    GWL_EXSTYLE = -20
-    
-    # Try to use SetWindowLongPtrW (64-bit) or SetWindowLongW (32-bit)
-    if hasattr(ctypes.windll.user32, 'SetWindowLongPtrW'):
-        SetWindowLong = ctypes.windll.user32.SetWindowLongPtrW
-        GetWindowLong = ctypes.windll.user32.GetWindowLongPtrW
-    else:
-        SetWindowLong = ctypes.windll.user32.SetWindowLongW
-        GetWindowLong = ctypes.windll.user32.GetWindowLongW
-except:
-    WINDOWS = False
+    import pystray
+    from PIL import Image, ImageDraw
+    HAS_PYSTRAY = True
+except ImportError:
+    HAS_PYSTRAY = False
 
-
-class TargetOverlay:
-    def __init__(self, parent, target_number, x=100, y=100, delay_ms=500):
-        self.parent = parent
-        self.target_number = target_number
-        self.x = x
-        self.y = y
-        self.delay_ms = delay_ms
-        self.visible = True
-        self.move_mode = True
-        self.dragging = False
-        self.drag_start_x = 0
-        self.drag_start_y = 0
-        
-        # Create overlay window
+class TargetWindow:
+    def __init__(self, target_id: int, x: int = None, y: int = None):
+        self.target_id = target_id
         self.window = tk.Toplevel()
         self.window.overrideredirect(True)  # Remove window decorations
-        self.window.attributes('-topmost', True)
-        self.window.attributes('-alpha', 0.8)
+        self.window.attributes('-topmost', True)  # Always on top
+        self.window.attributes('-alpha', 0.7)  # Semi-transparent
+        self.window.configure(bg='red')
         
-        # Make window small with crosshair
-        self.window.geometry(f"60x60+{x}+{y}")
-        self.window.configure(bg='black')
+        # Set size
+        self.window.geometry('30x30')
         
-        # Create canvas for crosshair
-        self.canvas = tk.Canvas(self.window, width=60, height=60, bg='black', highlightthickness=0)
-        self.canvas.pack()
+        # Set position
+        if x is None or y is None:
+            # Center on screen
+            screen_width = self.window.winfo_screenwidth()
+            screen_height = self.window.winfo_screenheight()
+            x = screen_width // 2 + (target_id - 1) * 50
+            y = screen_height // 2
+        self.window.geometry(f'30x30+{x}+{y}')
         
-        # Draw crosshair
-        self.draw_crosshair()
-        
-        # Add number label
-        self.number_label = tk.Label(
+        # Create label with cross and number
+        self.label = tk.Label(
             self.window,
-            text=str(target_number),
+            text=f'✕\n{target_id}',
             bg='red',
             fg='white',
-            font=('Arial', 12, 'bold'),
-            width=2,
-            height=1
+            font=('Arial', 8, 'bold'),
+            justify=tk.CENTER
         )
-        self.number_label.place(x=2, y=2)
+        self.label.pack(fill=tk.BOTH, expand=True)
         
-        # Bind events for dragging
-        self.canvas.bind('<Button-1>', self.on_click)
-        self.canvas.bind('<B1-Motion>', self.on_drag)
-        self.canvas.bind('<ButtonRelease-1>', self.on_release)
-        self.number_label.bind('<Button-1>', self.on_click)
-        self.number_label.bind('<B1-Motion>', self.on_drag)
-        self.number_label.bind('<ButtonRelease-1>', self.on_release)
+        # Make window click-through when not editing
+        self.set_click_through(True)
         
-        # Update position tracking
-        self.update_position()
-    
-    def draw_crosshair(self):
-        """Draw crosshair in the center of the canvas"""
-        self.canvas.delete("all")
-        center_x, center_y = 30, 30
-        # Horizontal line
-        self.canvas.create_line(10, center_y, 50, center_y, fill='red', width=2)
-        # Vertical line
-        self.canvas.create_line(center_x, 10, center_x, 50, fill='red', width=2)
-        # Circle in center
-        self.canvas.create_oval(center_x-5, center_y-5, center_x+5, center_y+5, outline='red', width=2)
-    
-    def on_click(self, event):
-        """Handle mouse click on overlay"""
-        if self.move_mode and self.visible:
-            self.dragging = True
-            self.drag_start_x = event.x_root
-            self.drag_start_y = event.y_root
-    
-    def on_drag(self, event):
-        """Handle mouse drag"""
-        if self.dragging and self.move_mode and self.visible:
-            dx = event.x_root - self.drag_start_x
-            dy = event.y_root - self.drag_start_y
-            new_x = self.window.winfo_x() + dx
-            new_y = self.window.winfo_y() + dy
-            self.window.geometry(f"60x60+{new_x}+{new_y}")
-            self.drag_start_x = event.x_root
-            self.drag_start_y = event.y_root
-            self.update_position()
-    
-    def on_release(self, event):
-        """Handle mouse release"""
-        self.dragging = False
-        self.update_position()
-    
-    def update_position(self):
-        """Update stored position from window geometry"""
-        self.x = self.window.winfo_x() + 30  # Center of crosshair
-        self.y = self.window.winfo_y() + 30
-    
-    def set_visible(self, visible):
-        """Show or hide the overlay"""
-        self.visible = visible
-        if visible:
-            self.window.deiconify()
-        else:
-            self.window.withdraw()
-    
-    def set_move_mode(self, move_mode):
-        """Set move mode (True) or click-through mode (False)"""
-        self.move_mode = move_mode
-        if move_mode:
-            self.window.attributes('-alpha', 0.8)
-            self.window.attributes('-topmost', True)
-            # Re-enable event handling for dragging
-            self.canvas.bind('<Button-1>', self.on_click)
-            self.canvas.bind('<B1-Motion>', self.on_drag)
-            self.canvas.bind('<ButtonRelease-1>', self.on_release)
-            self.number_label.bind('<Button-1>', self.on_click)
-            self.number_label.bind('<B1-Motion>', self.on_drag)
-            self.number_label.bind('<ButtonRelease-1>', self.on_release)
-            # Remove click-through style on Windows
-            if WINDOWS:
-                try:
-                    # Get window handle - tkinter's winfo_id() returns the window handle
-                    hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id())
-                    if hwnd == 0:
-                        hwnd = self.window.winfo_id()
-                    ex_style = GetWindowLong(hwnd, GWL_EXSTYLE)
-                    ex_style &= ~WS_EX_TRANSPARENT
-                    SetWindowLong(hwnd, GWL_EXSTYLE, ex_style)
-                except:
-                    pass
-        else:
-            # Click-through mode: make window more transparent
-            self.window.attributes('-alpha', 0.3)
-            self.window.attributes('-topmost', True)
-            # Disable event handling - clicks pass through
-            self.canvas.unbind('<Button-1>')
-            self.canvas.unbind('<B1-Motion>')
-            self.canvas.unbind('<ButtonRelease-1>')
-            self.number_label.unbind('<Button-1>')
-            self.number_label.unbind('<B1-Motion>')
-            self.number_label.unbind('<ButtonRelease-1>')
-            self.dragging = False
-            # Enable click-through style on Windows
-            if WINDOWS:
-                try:
-                    # Get window handle - tkinter's winfo_id() returns the window handle
-                    hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id())
-                    if hwnd == 0:
-                        hwnd = self.window.winfo_id()
-                    ex_style = GetWindowLong(hwnd, GWL_EXSTYLE)
-                    ex_style |= WS_EX_TRANSPARENT
-                    SetWindowLong(hwnd, GWL_EXSTYLE, ex_style)
-                except:
-                    pass
-    
-    def update_number(self, new_number):
-        """Update the target number"""
-        self.target_number = new_number
-        self.number_label.config(text=str(new_number))
-    
-    def destroy(self):
-        """Destroy the overlay window"""
-        self.window.destroy()
-
-
-class KeybindCapture:
-    def __init__(self, callback):
-        self.callback = callback
-        self.pressed_keys = set()
-        self.listener = None
-        self.capturing = False
-        self.first_release = True
-    
-    def start_capture(self):
-        """Start capturing keybind"""
-        self.pressed_keys = set()
-        self.capturing = True
-        self.first_release = True
-        self.listener = Listener(on_press=self.on_press, on_release=self.on_release)
-        self.listener.start()
-    
-    def stop_capture(self):
-        """Stop capturing keybind"""
-        self.capturing = False
-        if self.listener:
-            self.listener.stop()
-            self.listener = None
-    
-    def on_press(self, key):
-        """Handle key press"""
-        if not self.capturing:
-            return
+        # Drag functionality
+        self.drag_start_x = 0
+        self.drag_start_y = 0
+        self.is_dragging = False
         
+        self.label.bind('<Button-1>', self.start_drag)
+        self.label.bind('<B1-Motion>', self.on_drag)
+        self.label.bind('<ButtonRelease-1>', self.stop_drag)
+        
+    def set_click_through(self, value: bool):
+        """Set window click-through attribute"""
         try:
-            # Handle special keys
-            if key == Key.ctrl_l or key == Key.ctrl_r:
-                self.pressed_keys.add('Ctrl')
-            elif key == Key.alt_l or key == Key.alt_r:
-                self.pressed_keys.add('Alt')
-            elif key == Key.shift_l or key == Key.shift_r:
-                self.pressed_keys.add('Shift')
+            if value:
+                # Make more transparent and keep on top
+                self.window.attributes('-alpha', 0.01)
             else:
-                # Regular key
-                try:
-                    if hasattr(key, 'char') and key.char:
-                        self.pressed_keys.add(key.char.upper())
-                    else:
-                        key_name = str(key).replace("'", "")
-                        if key_name.startswith('Key.'):
-                            key_name = key_name.replace('Key.', '')
-                            if key_name not in ['ctrl_l', 'ctrl_r', 'alt_l', 'alt_r', 'shift_l', 'shift_r']:
-                                self.pressed_keys.add(key_name)
-                        else:
-                            self.pressed_keys.add(key_name.upper())
-                except:
-                    key_name = str(key).replace("'", "")
-                    if key_name.startswith('Key.'):
-                        key_name = key_name.replace('Key.', '')
-                        if key_name not in ['ctrl_l', 'ctrl_r', 'alt_l', 'alt_r', 'shift_l', 'shift_r']:
-                            self.pressed_keys.add(key_name)
+                # Make visible and draggable
+                self.window.attributes('-alpha', 0.7)
+                self.window.attributes('-topmost', True)
         except:
             pass
     
-    def on_release(self, key):
-        """Handle key release - finish capture"""
-        if not self.capturing:
-            return False
-        
-        # On first release of a non-modifier, finish capture
-        if self.first_release:
-            # Check if released key is a modifier
-            is_modifier = (key == Key.ctrl_l or key == Key.ctrl_r or 
-                          key == Key.alt_l or key == Key.alt_r or
-                          key == Key.shift_l or key == Key.shift_r)
-            
-            if not is_modifier or len(self.pressed_keys) > 3:  # If we have modifiers + regular key
-                import time
-                time.sleep(0.05)  # Small delay to capture all keys
-                
-                if self.pressed_keys:
-                    # Sort: modifiers first, then regular keys
-                    modifiers = [k for k in self.pressed_keys if k in ['Ctrl', 'Alt', 'Shift']]
-                    regular = [k for k in self.pressed_keys if k not in ['Ctrl', 'Alt', 'Shift']]
-                    keybind_str = '+'.join(sorted(modifiers) + sorted(regular))
-                    self.callback(keybind_str)
-                
-                self.stop_capture()
-                return False  # Stop listener
-        
-        return True
+    def start_drag(self, event):
+        self.drag_start_x = event.x
+        self.drag_start_y = event.y
+        self.is_dragging = True
+    
+    def on_drag(self, event):
+        if self.is_dragging:
+            x = self.window.winfo_x() + event.x - self.drag_start_x
+            y = self.window.winfo_y() + event.y - self.drag_start_y
+            self.window.geometry(f'30x30+{x}+{y}')
+    
+    def stop_drag(self, event):
+        self.is_dragging = False
+    
+    def get_position(self) -> Tuple[int, int]:
+        """Get current position of the target"""
+        return (self.window.winfo_x(), self.window.winfo_y())
+    
+    def destroy(self):
+        try:
+            self.window.destroy()
+        except:
+            pass
+    
+    def show(self):
+        try:
+            self.window.deiconify()
+            self.window.lift()
+        except:
+            pass
+    
+    def hide(self):
+        try:
+            self.window.withdraw()
+        except:
+            pass
 
-
-class MainWindow:
-    def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("Autoclicker")
-        self.root.geometry("600x700")
+class Script:
+    def __init__(self, name: str):
+        self.name = name
+        self.targets: List[Dict] = []  # List of {x, y, delay, id}
+        self.keybind: Optional[str] = None
+        self.keybind_hotkey: Optional[str] = None  # Format for keyboard library
+        self.target_windows: List[TargetWindow] = []
+        self.is_editing = False
+    
+    def add_target(self, x: int = None, y: int = None, delay: int = 0):
+        """Add a new target to the script"""
+        target_id = len(self.targets) + 1
+        if x is None or y is None:
+            screen_width = tk.Tk().winfo_screenwidth()
+            screen_height = tk.Tk().winfo_screenheight()
+            x = screen_width // 2 + (target_id - 1) * 50
+            y = screen_height // 2
         
-        self.targets = []
-        self.keybinds = {
-            "activate": None,
-            "toggle_visibility": None,
-            "toggle_mode": None
+        target = {
+            'id': target_id,
+            'x': x,
+            'y': y,
+            'delay': delay
         }
-        self.keybind_listeners = {}
-        self.script_running = False
-        self.targets_visible = True
-        self.targets_move_mode = True
+        self.targets.append(target)
+        return target_id
+    
+    def to_dict(self) -> Dict:
+        """Convert script to dictionary for JSON serialization"""
+        return {
+            'name': self.name,
+            'targets': self.targets,
+            'keybind': self.keybind
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'Script':
+        """Create script from dictionary"""
+        script = cls(data['name'])
+        script.targets = data.get('targets', [])
+        script.keybind = data.get('keybind')
+        return script
+
+class AutoClickerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("AutoClicker")
+        self.root.geometry("900x700")
         
-        # Queue for thread communication
-        self.event_queue = queue.Queue()
-        
-        # Keybind capture
-        self.current_capture = None
-        self.capture_callback = None
-        
-        # System tray
+        self.scripts: List[Script] = []
+        self.currently_editing: Optional[Script] = None
+        self.is_running = False
+        self.keyboard_hooks = {}  # Store keyboard hook IDs
+        self.selected_script_index = None
         self.tray_icon = None
         self.tray_thread = None
         
-        self.setup_ui()
-        self.setup_system_tray()
-        self.check_queue()
+        # Create UI
+        self.create_ui()
         
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.root.bind('<Unmap>', self.on_minimize)
+        
+        # Bind selection change
+        self.scripts_listbox.bind('<<ListboxSelect>>', self.on_script_select)
+        
+        # Create system tray icon
+        if HAS_PYSTRAY:
+            self.create_tray_icon()
+        
+    def create_ui(self):
+        # Main container
+        main_frame = tk.Frame(self.root)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Left panel - Scripts list
+        left_panel = tk.Frame(main_frame, width=200)
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, padx=(0, 10))
+        left_panel.pack_propagate(False)
+        
+        tk.Label(left_panel, text="Scripts", font=('Arial', 14, 'bold')).pack(anchor=tk.W, pady=(0, 5))
+        
+        # Scripts listbox with scrollbar
+        list_frame = tk.Frame(left_panel)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.scripts_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set)
+        self.scripts_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.scripts_listbox.yview)
+        
+        # Buttons frame
+        buttons_frame = tk.Frame(left_panel)
+        buttons_frame.pack(fill=tk.X, pady=5)
+        
+        self.add_script_btn = tk.Button(buttons_frame, text="Add Script", command=self.add_script)
+        self.add_script_btn.pack(fill=tk.X, pady=2)
+        
+        self.save_scripts_btn = tk.Button(buttons_frame, text="Save Scripts", command=self.save_scripts)
+        self.save_scripts_btn.pack(fill=tk.X, pady=2)
+        
+        self.load_scripts_btn = tk.Button(buttons_frame, text="Load Scripts", command=self.load_scripts)
+        self.load_scripts_btn.pack(fill=tk.X, pady=2)
+        
+        self.run_btn = tk.Button(buttons_frame, text="Run", command=self.toggle_run, bg='green', fg='white', font=('Arial', 10, 'bold'))
+        self.run_btn.pack(fill=tk.X, pady=5)
+        
+        # Right panel - Script details
+        right_panel = tk.Frame(main_frame)
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        self.details_frame = tk.Frame(right_panel)
+        self.details_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.current_script_frame = None
+        self.update_details_view()
     
-    def setup_ui(self):
-        """Setup the user interface"""
-        # Main frame
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+    def on_script_select(self, event):
+        """Handle script selection"""
+        selection = self.scripts_listbox.curselection()
+        if selection:
+            self.selected_script_index = selection[0]
+            self.update_details_view()
+    
+    def update_details_view(self):
+        """Update the details view based on selected script"""
+        # Clear current details
+        if self.current_script_frame:
+            self.current_script_frame.destroy()
         
-        # Control buttons frame
-        control_frame = ttk.LabelFrame(main_frame, text="Controls", padding="10")
-        control_frame.pack(fill=tk.X, pady=5)
+        self.current_script_frame = tk.Frame(self.details_frame)
+        self.current_script_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Add Target button
-        ttk.Button(control_frame, text="Add Target", command=self.add_target).pack(side=tk.LEFT, padx=5)
+        if self.selected_script_index is None or self.selected_script_index >= len(self.scripts):
+            tk.Label(self.current_script_frame, text="Select a script to view details", font=('Arial', 12)).pack(pady=50)
+            return
         
-        # Keybind buttons frame
-        keybind_frame = ttk.LabelFrame(main_frame, text="Keybinds", padding="10")
+        script = self.scripts[self.selected_script_index]
+        
+        # Script name with highlight if editing
+        name_frame = tk.Frame(self.current_script_frame)
+        name_frame.pack(fill=tk.X, pady=5)
+        
+        name_bg = 'yellow' if script.is_editing else 'SystemButtonFace'
+        name_label_frame = tk.Frame(name_frame, bg=name_bg, relief=tk.RIDGE, borderwidth=2)
+        name_label_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        tk.Label(name_label_frame, text=f"Script: {script.name}", font=('Arial', 12, 'bold'), bg=name_bg).pack(padx=5, pady=2)
+        
+        # Edit/Finish button
+        edit_text = "Finish Editing" if script.is_editing else "Edit Script"
+        edit_color = 'orange' if script.is_editing else 'blue'
+        edit_btn = tk.Button(name_frame, text=edit_text, command=lambda: self.toggle_edit_script(self.selected_script_index), bg=edit_color, fg='white')
+        edit_btn.pack(side=tk.RIGHT)
+        
+        # Keybind
+        keybind_frame = tk.Frame(self.current_script_frame)
         keybind_frame.pack(fill=tk.X, pady=5)
+        tk.Label(keybind_frame, text="Keybind:", font=('Arial', 10)).pack(side=tk.LEFT)
+        keybind_label = tk.Label(keybind_frame, text=script.keybind if script.keybind else "Not set", fg='gray', font=('Arial', 10))
+        keybind_label.pack(side=tk.LEFT, padx=5)
+        set_keybind_btn = tk.Button(keybind_frame, text="Set Keybind", command=lambda: self.set_keybind(self.selected_script_index))
+        set_keybind_btn.pack(side=tk.RIGHT)
         
-        # Script activation keybind
-        activate_frame = ttk.Frame(keybind_frame)
-        activate_frame.pack(fill=tk.X, pady=2)
-        ttk.Button(activate_frame, text="Set Keybind (Activate)", command=lambda: self.set_keybind("activate")).pack(side=tk.LEFT, padx=5)
-        self.activate_keybind_label = ttk.Label(activate_frame, text="Not set")
-        self.activate_keybind_label.pack(side=tk.LEFT, padx=5)
+        # Targets section
+        targets_label_frame = tk.Frame(self.current_script_frame)
+        targets_label_frame.pack(fill=tk.X, pady=(10, 5))
+        tk.Label(targets_label_frame, text="Targets:", font=('Arial', 10, 'bold')).pack(side=tk.LEFT)
+        add_target_btn = tk.Button(targets_label_frame, text="Add Target", command=lambda: self.add_target(self.selected_script_index))
+        add_target_btn.pack(side=tk.RIGHT)
         
-        # Visibility toggle keybind
-        visibility_frame = ttk.Frame(keybind_frame)
-        visibility_frame.pack(fill=tk.X, pady=2)
-        ttk.Button(visibility_frame, text="Set Visibility Toggle", command=lambda: self.set_keybind("toggle_visibility")).pack(side=tk.LEFT, padx=5)
-        self.visibility_keybind_label = ttk.Label(visibility_frame, text="Not set")
-        self.visibility_keybind_label.pack(side=tk.LEFT, padx=5)
+        # Targets list with scrollbar
+        targets_list_frame = tk.Frame(self.current_script_frame)
+        targets_list_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Move/Click-through toggle keybind
-        mode_frame = ttk.Frame(keybind_frame)
-        mode_frame.pack(fill=tk.X, pady=2)
-        ttk.Button(mode_frame, text="Set Mode Toggle", command=lambda: self.set_keybind("toggle_mode")).pack(side=tk.LEFT, padx=5)
-        self.mode_keybind_label = ttk.Label(mode_frame, text="Not set")
-        self.mode_keybind_label.pack(side=tk.LEFT, padx=5)
+        targets_scrollbar = tk.Scrollbar(targets_list_frame)
+        targets_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        # Save/Load buttons
-        file_frame = ttk.LabelFrame(main_frame, text="File Operations", padding="10")
-        file_frame.pack(fill=tk.X, pady=5)
+        targets_canvas = tk.Canvas(targets_list_frame, yscrollcommand=targets_scrollbar.set)
+        targets_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        targets_scrollbar.config(command=targets_canvas.yview)
         
-        ttk.Button(file_frame, text="Save Script", command=self.save_script).pack(side=tk.LEFT, padx=5)
-        ttk.Button(file_frame, text="Load Script", command=self.load_script).pack(side=tk.LEFT, padx=5)
+        targets_inner_frame = tk.Frame(targets_canvas)
+        targets_canvas_window = targets_canvas.create_window((0, 0), window=targets_inner_frame, anchor=tk.NW)
         
-        # Status frame
-        status_frame = ttk.LabelFrame(main_frame, text="Status", padding="10")
-        status_frame.pack(fill=tk.X, pady=5)
+        # Update scroll region
+        def update_scroll_region(event):
+            targets_canvas.configure(scrollregion=targets_canvas.bbox("all"))
+            targets_canvas.configure(width=targets_inner_frame.winfo_reqwidth())
         
-        self.status_label = ttk.Label(status_frame, text="Ready")
-        self.status_label.pack()
+        targets_inner_frame.bind('<Configure>', update_scroll_region)
+        targets_canvas.bind('<Configure>', lambda e: targets_canvas.configure(width=e.width))
         
-        # Targets list frame
-        targets_frame = ttk.LabelFrame(main_frame, text="Targets", padding="10")
-        targets_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        
-        # Scrollable frame for targets
-        canvas = tk.Canvas(targets_frame)
-        scrollbar = ttk.Scrollbar(targets_frame, orient="vertical", command=canvas.yview)
-        self.scrollable_frame = ttk.Frame(canvas)
-        
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-        
-        canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        self.targets_container = self.scrollable_frame
-    
-    def add_target(self):
-        """Add a new target overlay"""
-        # Get current mouse position
-        x, y = pyautogui.position()
-        target_number = len(self.targets) + 1
-        delay_ms = 500
-        
-        target = TargetOverlay(self.root, target_number, x-30, y-30, delay_ms)
-        self.targets.append(target)
-        
-        self.update_targets_list()
-        self.update_target_visibility()
-        self.update_target_move_mode()
-    
-    def update_targets_list(self):
-        """Update the targets list in the UI"""
-        # Clear existing widgets
-        for widget in self.targets_container.winfo_children():
-            widget.destroy()
-        
-        # Create widgets for each target
-        for i, target in enumerate(self.targets):
-            target_frame = ttk.Frame(self.targets_container)
-            target_frame.pack(fill=tk.X, pady=2)
+        # Create target entries
+        for i, target in enumerate(script.targets):
+            target_frame = tk.Frame(targets_inner_frame, relief=tk.RIDGE, borderwidth=1)
+            target_frame.pack(fill=tk.X, pady=2, padx=5)
             
-            # Target number and position
-            info_label = ttk.Label(target_frame, text=f"Target {target.target_number}: ({target.x}, {target.y})")
-            info_label.pack(side=tk.LEFT, padx=5)
+            tk.Label(target_frame, text=f"Target {target['id']}:", width=10, anchor=tk.W).pack(side=tk.LEFT, padx=5)
+            tk.Label(target_frame, text="Delay (ms):").pack(side=tk.LEFT, padx=5)
             
-            # Delay input
-            delay_label = ttk.Label(target_frame, text="Delay (ms):")
-            delay_label.pack(side=tk.LEFT, padx=5)
-            
-            delay_var = tk.StringVar(value=str(target.delay_ms))
-            delay_entry = ttk.Entry(target_frame, textvariable=delay_var, width=10)
+            delay_var = tk.StringVar(value=str(target['delay']))
+            delay_entry = tk.Entry(target_frame, textvariable=delay_var, width=10)
             delay_entry.pack(side=tk.LEFT, padx=5)
+            delay_entry.bind('<KeyRelease>', lambda e, idx=i: self.update_target_delay(self.selected_script_index, idx))
+            delay_entry.bind('<FocusOut>', lambda e, idx=i: self.update_target_delay(self.selected_script_index, idx))
             
-            def update_delay(t=target, v=delay_var):
-                try:
-                    t.delay_ms = int(v.get())
-                except ValueError:
-                    pass
-            
-            delay_var.trace('w', lambda *args, t=target, v=delay_var: update_delay(t, v))
-            
-            # Delete button
-            ttk.Button(target_frame, text="Delete", command=lambda idx=i: self.delete_target(idx)).pack(side=tk.LEFT, padx=5)
-    
-    def delete_target(self, index):
-        """Delete a target"""
-        if 0 <= index < len(self.targets):
-            self.targets[index].destroy()
-            self.targets.pop(index)
-            self.renumber_targets()
-            self.update_targets_list()
-    
-    def renumber_targets(self):
-        """Renumber all targets starting from 1"""
-        for i, target in enumerate(self.targets):
-            target.update_number(i + 1)
-    
-    def set_keybind(self, keybind_type):
-        """Set a keybind for the specified action"""
-        self.status_label.config(text=f"Press keys for {keybind_type}...")
-        self.root.update()
+            # Store reference to update
+            target['delay_var'] = delay_var
         
-        # Stop any existing capture
-        if self.current_capture:
-            self.current_capture.stop_capture()
-        
-        # Stop existing listener for this keybind type
-        if keybind_type in self.keybind_listeners:
-            self.keybind_listeners[keybind_type].stop()
-            del self.keybind_listeners[keybind_type]
-        
-        def on_capture(keybind_str):
-            self.keybinds[keybind_type] = keybind_str
-            self.update_keybind_labels()
-            self.status_label.config(text="Keybind set!")
-            self.setup_keybind_listener(keybind_type, keybind_str)
-        
-        self.capture_callback = on_capture
-        self.current_capture = KeybindCapture(on_capture)
-        self.current_capture.start_capture()
+        targets_inner_frame.update_idletasks()
+        targets_canvas.configure(scrollregion=targets_canvas.bbox("all"))
     
-    def update_keybind_labels(self):
-        """Update keybind display labels"""
-        self.activate_keybind_label.config(text=self.keybinds["activate"] or "Not set")
-        self.visibility_keybind_label.config(text=self.keybinds["toggle_visibility"] or "Not set")
-        self.mode_keybind_label.config(text=self.keybinds["toggle_mode"] or "Not set")
+    def add_script(self):
+        """Add a new script"""
+        name = simpledialog.askstring("Add Script", "Enter script name:")
+        if name:
+            script = Script(name)
+            self.scripts.append(script)
+            self.scripts_listbox.insert(tk.END, name)
+            self.scripts_listbox.selection_clear(0, tk.END)
+            self.scripts_listbox.selection_set(tk.END)
+            self.scripts_listbox.see(tk.END)
+            self.selected_script_index = len(self.scripts) - 1
+            self.update_details_view()
+            self.update_scripts_listbox()
     
-    def setup_keybind_listener(self, keybind_type, keybind_str):
-        """Setup global keybind listener"""
-        if not keybind_str:
+    def toggle_edit_script(self, script_index: int):
+        """Toggle edit mode for a script"""
+        if script_index >= len(self.scripts):
             return
         
-        # Parse keybind string
-        keys = [k.strip() for k in keybind_str.split('+')]
-        required_modifiers = set()
-        required_keys = []
+        script = self.scripts[script_index]
         
-        for key in keys:
-            if key in ['Ctrl', 'Alt', 'Shift']:
-                required_modifiers.add(key)
-            else:
-                required_keys.append(key)
+        if script.is_editing:
+            # Finish editing - save positions and hide windows
+            script.is_editing = False
+            self.save_target_positions(script)
+            self.hide_target_windows(script)
+            if self.currently_editing == script:
+                self.currently_editing = None
+        else:
+            # Start editing - hide previous script's targets
+            if self.currently_editing:
+                self.currently_editing.is_editing = False
+                self.save_target_positions(self.currently_editing)
+                self.hide_target_windows(self.currently_editing)
+            
+            script.is_editing = True
+            self.currently_editing = script
+            self.show_target_windows(script)
         
-        # Create listener in separate thread
-        def listen_thread():
+        self.update_details_view()
+        self.update_scripts_listbox()
+    
+    def save_target_positions(self, script: Script):
+        """Save current positions of target windows to script targets"""
+        for window, target in zip(script.target_windows, script.targets):
+            if window.target_id == target['id']:
+                pos = window.get_position()
+                target['x'] = pos[0]
+                target['y'] = pos[1]
+    
+    def show_target_windows(self, script: Script):
+        """Show and make target windows visible and draggable"""
+        # Destroy old windows
+        for window in script.target_windows:
+            window.destroy()
+        script.target_windows = []
+        
+        # Create new windows for all targets
+        for target in script.targets:
+            window = TargetWindow(target['id'], target['x'], target['y'])
+            window.set_click_through(False)  # Make draggable
+            script.target_windows.append(window)
+    
+    def hide_target_windows(self, script: Script):
+        """Hide target windows and make them click-through"""
+        for window in script.target_windows:
+            window.set_click_through(True)
+        # Positions are saved before hiding
+    
+    def add_target(self, script_index: int):
+        """Add a target to a script"""
+        if script_index >= len(self.scripts):
+            return
+        
+        script = self.scripts[script_index]
+        target_id = script.add_target(delay=0)
+        
+        if script.is_editing:
+            # Create window immediately
+            target = script.targets[-1]
+            window = TargetWindow(target_id, target['x'], target['y'])
+            window.set_click_through(False)
+            script.target_windows.append(window)
+        
+        self.update_details_view()
+    
+    def update_target_delay(self, script_index: int, target_index: int):
+        """Update delay for a target"""
+        if script_index >= len(self.scripts):
+            return
+        
+        script = self.scripts[script_index]
+        if target_index < len(script.targets):
+            target = script.targets[target_index]
             try:
-                pressed_modifiers = set()
-                pressed_keys = set()
-                last_trigger_time = 0
-                
-                def on_press(key):
-                    nonlocal last_trigger_time
-                    try:
-                        # Track modifiers
-                        if key == Key.ctrl_l or key == Key.ctrl_r:
-                            pressed_modifiers.add('Ctrl')
-                        elif key == Key.alt_l or key == Key.alt_r:
-                            pressed_modifiers.add('Alt')
-                        elif key == Key.shift_l or key == Key.shift_r:
-                            pressed_modifiers.add('Shift')
-                        else:
-                            # Track regular keys
-                            if hasattr(key, 'char') and key.char:
-                                pressed_keys.add(key.char.upper())
-                            else:
-                                key_name = str(key).replace("'", "")
-                                if key_name.startswith('Key.'):
-                                    key_name = key_name.replace('Key.', '')
-                                    if key_name not in ['ctrl_l', 'ctrl_r', 'alt_l', 'alt_r', 'shift_l', 'shift_r']:
-                                        pressed_keys.add(key_name)
-                                else:
-                                    pressed_keys.add(key_name.upper())
-                        
-                        # Check if all required keys are pressed
-                        if (required_modifiers.issubset(pressed_modifiers) and 
-                            all(k in pressed_keys for k in required_keys)):
-                            import time
-                            current_time = time.time()
-                            # Prevent rapid repeated triggers
-                            if current_time - last_trigger_time > 0.3:
-                                last_trigger_time = current_time
-                                self.event_queue.put(('keybind', keybind_type))
-                    except Exception as e:
-                        pass
-                
-                def on_release(key):
-                    try:
-                        # Remove from pressed sets
-                        if key == Key.ctrl_l or key == Key.ctrl_r:
-                            pressed_modifiers.discard('Ctrl')
-                        elif key == Key.alt_l or key == Key.alt_r:
-                            pressed_modifiers.discard('Alt')
-                        elif key == Key.shift_l or key == Key.shift_r:
-                            pressed_modifiers.discard('Shift')
-                        else:
-                            if hasattr(key, 'char') and key.char:
-                                pressed_keys.discard(key.char.upper())
-                            else:
-                                key_name = str(key).replace("'", "")
-                                if key_name.startswith('Key.'):
-                                    key_name = key_name.replace('Key.', '')
-                                    if key_name not in ['ctrl_l', 'ctrl_r', 'alt_l', 'alt_r', 'shift_l', 'shift_r']:
-                                        pressed_keys.discard(key_name)
-                                else:
-                                    pressed_keys.discard(key_name.upper())
-                    except:
-                        pass
-                
-                listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-                listener.start()
-                self.keybind_listeners[keybind_type] = listener
-            except Exception as e:
-                print(f"Error setting up keybind listener: {e}")
-        
-        thread = threading.Thread(target=listen_thread, daemon=True)
-        thread.start()
+                delay = int(target['delay_var'].get())
+                target['delay'] = delay
+            except ValueError:
+                pass
     
-    def check_queue(self):
-        """Check for events from threads"""
-        try:
-            while True:
-                event_type, data = self.event_queue.get_nowait()
-                if event_type == 'keybind':
-                    self.handle_keybind(data)
-                elif event_type == 'script_done':
-                    self.script_running = False
-                    self.status_label.config(text="Script completed!")
-                elif event_type == 'script_error':
-                    self.script_running = False
-                    self.status_label.config(text=f"Script error: {data}")
-        except queue.Empty:
-            pass
-        
-        self.root.after(100, self.check_queue)
-    
-    def handle_keybind(self, keybind_type):
-        """Handle keybind activation"""
-        if keybind_type == "activate":
-            if self.script_running:
-                self.stop_script()
-            else:
-                self.start_script()
-        elif keybind_type == "toggle_visibility":
-            self.toggle_targets_visibility()
-        elif keybind_type == "toggle_mode":
-            if self.targets_visible:
-                self.toggle_targets_move_mode()
-    
-    def start_script(self):
-        """Start the clicking script"""
-        if not self.targets:
-            self.status_label.config(text="No targets to click!")
+    def set_keybind(self, script_index: int):
+        """Set keybind for a script"""
+        if script_index >= len(self.scripts):
             return
         
-        if self.script_running:
-            return
+        script = self.scripts[script_index]
         
-        self.script_running = True
-        self.status_label.config(text="Script running...")
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Set Keybind")
+        dialog.geometry("500x250")
+        dialog.attributes('-topmost', True)
+        dialog.transient(self.root)
         
-        def run_script():
+        tk.Label(dialog, text="Press the key combination you want to use", font=('Arial', 11)).pack(pady=20)
+        tk.Label(dialog, text="(e.g., alt+p, ctrl+e+r)", font=('Arial', 9), fg='gray').pack()
+        
+        keybind_var = tk.StringVar(value="Waiting for keys...")
+        keybind_label = tk.Label(dialog, textvariable=keybind_var, font=('Arial', 14, 'bold'), fg='blue')
+        keybind_label.pack(pady=15)
+        
+        captured_hotkey = [None]
+        capture_active = [True]
+        
+        def capture_hotkey_thread():
+            """Capture hotkey in background thread"""
             try:
-                for target in self.targets:
-                    if not self.script_running:
-                        break
-                    
-                    # Wait for delay
-                    import time
-                    time.sleep(target.delay_ms / 1000.0)
-                    
-                    if not self.script_running:
-                        break
-                    
-                    # Click at target position
-                    pyautogui.click(target.x, target.y)
-                
-                self.event_queue.put(('script_done', None))
+                # Use keyboard library to read hotkey
+                hotkey = keyboard.read_hotkey()
+                if capture_active[0] and hotkey:
+                    captured_hotkey[0] = hotkey
+                    # Format for display
+                    parts = hotkey.split('+')
+                    display_parts = []
+                    for part in parts:
+                        if len(part) > 1:
+                            display_parts.append(part.capitalize())
+                        else:
+                            display_parts.append(part.upper())
+                    display_str = '+'.join(display_parts)
+                    dialog.after(0, lambda: keybind_var.set(display_str))
             except Exception as e:
-                self.event_queue.put(('script_error', str(e)))
+                print(f"Error capturing hotkey: {e}")
         
-        thread = threading.Thread(target=run_script, daemon=True)
-        thread.start()
+        def start_capture():
+            """Start capturing hotkey"""
+            keybind_var.set("Press your key combination now...")
+            threading.Thread(target=capture_hotkey_thread, daemon=True).start()
+        
+        def save_keybind():
+            if captured_hotkey[0]:
+                hotkey = captured_hotkey[0]
+                # Format for display
+                parts = hotkey.split('+')
+                display_parts = []
+                for part in parts:
+                    if len(part) > 1:
+                        display_parts.append(part.capitalize())
+                    else:
+                        display_parts.append(part.upper())
+                display_str = '+'.join(display_parts)
+                
+                script.keybind = display_str
+                script.keybind_hotkey = hotkey
+                capture_active[0] = False
+                dialog.destroy()
+                self.update_details_view()
+                # Restart keyboard hooks if running
+                if self.is_running:
+                    self.stop_running()
+                    self.start_running()
+            else:
+                messagebox.showwarning("Warning", "Please capture a keybind first!")
+        
+        def cancel():
+            capture_active[0] = False
+            dialog.destroy()
+        
+        btn_frame = tk.Frame(dialog)
+        btn_frame.pack(pady=20)
+        
+        capture_btn = tk.Button(btn_frame, text="Start Capture", command=start_capture, width=12)
+        capture_btn.pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Save", command=save_keybind, width=10).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Cancel", command=cancel, width=10).pack(side=tk.LEFT, padx=5)
+        
+        # Instructions
+        tk.Label(dialog, text="Click 'Start Capture', then press your key combination", font=('Arial', 8), fg='gray').pack(pady=5)
+        
+        # Auto-start capture
+        dialog.after(100, start_capture)
     
-    def stop_script(self):
-        """Stop the clicking script"""
-        self.script_running = False
-        self.status_label.config(text="Script stopped")
-    
-    def toggle_targets_visibility(self):
-        """Toggle targets visibility"""
-        self.targets_visible = not self.targets_visible
-        self.update_target_visibility()
-        status = "visible" if self.targets_visible else "hidden"
-        self.status_label.config(text=f"Targets {status}")
-    
-    def update_target_visibility(self):
-        """Update visibility of all targets"""
-        for target in self.targets:
-            target.set_visible(self.targets_visible)
-    
-    def toggle_targets_move_mode(self):
-        """Toggle between move mode and click-through mode"""
-        self.targets_move_mode = not self.targets_move_mode
-        self.update_target_move_mode()
-        mode = "move mode" if self.targets_move_mode else "click-through mode"
-        self.status_label.config(text=f"Targets: {mode}")
-    
-    def update_target_move_mode(self):
-        """Update move mode of all targets"""
-        for target in self.targets:
-            target.set_move_mode(self.targets_move_mode)
-    
-    def save_script(self):
-        """Save script to JSON file"""
-        filename = filedialog.asksaveasfilename(
+    def save_scripts(self):
+        """Save scripts to JSON file"""
+        # Save target positions before saving
+        for script in self.scripts:
+            if script.is_editing:
+                self.save_target_positions(script)
+        
+        file_path = filedialog.asksaveasfilename(
             defaultextension=".json",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
         )
-        
-        if not filename:
-            return
-        
-        try:
-            data = {
-                "targets": [
-                    {
-                        "number": target.target_number,
-                        "x": target.x,
-                        "y": target.y,
-                        "delay_ms": target.delay_ms
-                    }
-                    for target in self.targets
-                ],
-                "keybinds": self.keybinds
-            }
-            
-            with open(filename, 'w') as f:
-                json.dump(data, f, indent=2)
-            
-            self.status_label.config(text="Script saved!")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to save script: {e}")
+        if file_path:
+            data = [script.to_dict() for script in self.scripts]
+            try:
+                with open(file_path, 'w') as f:
+                    json.dump(data, f, indent=2)
+                messagebox.showinfo("Success", "Scripts saved successfully!")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save scripts: {str(e)}")
     
-    def load_script(self):
-        """Load script from JSON file"""
-        filename = filedialog.askopenfilename(
+    def load_scripts(self):
+        """Load scripts from JSON file"""
+        file_path = filedialog.askopenfilename(
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
         )
+        if file_path:
+            try:
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+                
+                # Stop running before loading
+                was_running = self.is_running
+                if self.is_running:
+                    self.stop_running()
+                
+                self.scripts = [Script.from_dict(item) for item in data]
+                
+                # Update listbox
+                self.scripts_listbox.delete(0, tk.END)
+                for script in self.scripts:
+                    self.scripts_listbox.insert(tk.END, script.name)
+                
+                # Restore keybind hotkeys
+                for script in self.scripts:
+                    if script.keybind:
+                        # Parse keybind back to hotkey format
+                        parts = script.keybind.lower().split('+')
+                        script.keybind_hotkey = '+'.join(parts)
+                
+                if was_running:
+                    self.start_running()
+                
+                messagebox.showinfo("Success", "Scripts loaded successfully!")
+                self.update_details_view()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load scripts: {str(e)}")
+    
+    def toggle_run(self):
+        """Toggle run mode (start/stop listening for keybinds)"""
+        if self.is_running:
+            self.stop_running()
+        else:
+            self.start_running()
+    
+    def start_running(self):
+        """Start listening for keybinds"""
+        self.is_running = True
+        self.run_btn.config(text="Stop", bg='red')
         
-        if not filename:
+        # Register hotkeys for all scripts with keybinds
+        self.keyboard_hooks.clear()
+        for script in self.scripts:
+            if script.keybind_hotkey:
+                try:
+                    # Register hotkey
+                    keyboard.add_hotkey(script.keybind_hotkey, lambda s=script: self.execute_script(s))
+                    self.keyboard_hooks[script] = script.keybind_hotkey
+                except Exception as e:
+                    print(f"Error registering hotkey for {script.name}: {e}")
+    
+    def stop_running(self):
+        """Stop listening for keybinds"""
+        self.is_running = False
+        self.run_btn.config(text="Run", bg='green')
+        
+        # Unregister all hotkeys
+        try:
+            keyboard.unhook_all_hotkeys()
+        except:
+            pass
+        self.keyboard_hooks.clear()
+    
+    def execute_script(self, script: Script):
+        """Execute a script (click targets in order)"""
+        if not script.targets:
+            return
+        
+        # Execute in separate thread to avoid blocking
+        threading.Thread(target=self._execute_script_thread, args=(script,), daemon=True).start()
+    
+    def _execute_script_thread(self, script: Script):
+        """Execute script in thread"""
+        try:
+            for target in script.targets:
+                if target['delay'] > 0:
+                    time.sleep(target['delay'] / 1000.0)
+                # Click at target position (center of 30x30 window)
+                pyautogui.click(target['x'] + 15, target['y'] + 15)
+                time.sleep(0.05)  # Small delay between clicks
+        except Exception as e:
+            print(f"Error executing script {script.name}: {e}")
+    
+    def update_scripts_listbox(self):
+        """Update the scripts listbox display with highlights"""
+        # Note: tkinter listbox doesn't easily support per-item colors
+        # We'll highlight in the details view instead
+        pass
+    
+    def create_tray_icon(self):
+        """Create system tray icon"""
+        if not HAS_PYSTRAY:
             return
         
         try:
-            with open(filename, 'r') as f:
-                data = json.load(f)
+            # Create icon image
+            image = Image.new('RGB', (64, 64), color='white')
+            draw = ImageDraw.Draw(image)
+            draw.ellipse([16, 16, 48, 48], fill='blue', outline='black', width=2)
+            # Draw "AC" text centered
+            try:
+                from PIL import ImageFont
+                font = ImageFont.truetype("arial.ttf", 20)
+            except:
+                font = None
+            draw.text((32, 32), "AC", fill='white', anchor='mm', font=font)
             
-            # Clear existing targets
-            for target in self.targets:
-                target.destroy()
-            self.targets = []
+            # Create menu
+            menu = pystray.Menu(
+                pystray.MenuItem("Show Window", self.show_window),
+                pystray.MenuItem("Exit", self.quit_app)
+            )
             
-            # Load targets
-            for target_data in data.get("targets", []):
-                target = TargetOverlay(
-                    self.root,
-                    target_data["number"],
-                    target_data["x"] - 30,
-                    target_data["y"] - 30,
-                    target_data.get("delay_ms", 500)
-                )
-                self.targets.append(target)
+            # Create icon
+            self.tray_icon = pystray.Icon("AutoClicker", image, "AutoClicker", menu)
             
-            # Load keybinds
-            self.keybinds = data.get("keybinds", {
-                "activate": None,
-                "toggle_visibility": None,
-                "toggle_mode": None
-            })
-            
-            # Stop existing listeners
-            for listener in self.keybind_listeners.values():
-                listener.stop()
-            self.keybind_listeners = {}
-            
-            # Setup new listeners
-            for keybind_type, keybind_str in self.keybinds.items():
-                if keybind_str:
-                    self.setup_keybind_listener(keybind_type, keybind_str)
-            
-            self.update_targets_list()
-            self.update_keybind_labels()
-            self.update_target_visibility()
-            self.update_target_move_mode()
-            
-            self.status_label.config(text="Script loaded!")
+            # Run tray in separate thread
+            self.tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
+            self.tray_thread.start()
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load script: {e}")
-    
-    def setup_system_tray(self):
-        """Setup system tray icon"""
-        # Create a simple icon
-        image = Image.new('RGB', (64, 64), color='red')
-        draw = ImageDraw.Draw(image)
-        draw.ellipse([16, 16, 48, 48], fill='white')
-        
-        menu = pystray.Menu(
-            pystray.MenuItem("Show Window", self.show_window),
-            pystray.MenuItem("Exit", self.quit_app)
-        )
-        
-        self.tray_icon = pystray.Icon("Autoclicker", image, "Autoclicker", menu)
-        
-        def run_tray():
-            self.tray_icon.run()
-        
-        self.tray_thread = threading.Thread(target=run_tray, daemon=True)
-        self.tray_thread.start()
+            print(f"Error creating tray icon: {e}")
     
     def show_window(self, icon=None, item=None):
         """Show the main window"""
+        self.root.after(0, self._show_window)
+    
+    def _show_window(self):
+        """Show window from main thread"""
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
     
     def quit_app(self, icon=None, item=None):
-        """Quit the application"""
+        """Quit application"""
+        if self.is_running:
+            self.stop_running()
         if self.tray_icon:
             self.tray_icon.stop()
-        self.root.quit()
-        sys.exit()
+        self.root.after(0, self.root.quit)
+    
+    def on_minimize(self, event):
+        """Handle window minimization"""
+        if event.widget != self.root:
+            return
+        # Check if window is being minimized
+        if self.root.state() == 'iconic':
+            # Hide to system tray
+            self.root.withdraw()
     
     def on_closing(self):
-        """Handle window closing - minimize to tray"""
+        """Handle window closing"""
+        # Hide window instead of destroying (for system tray functionality)
         self.root.withdraw()
-    
-    def run(self):
-        """Start the application"""
-        self.root.mainloop()
+        
+        # Note: Target windows will remain visible if a script is being edited
+        # This is intentional per requirements
 
+def main():
+    # Set PyAutoGUI failsafe (move mouse to corner to stop)
+    pyautogui.FAILSAFE = True
+    pyautogui.PAUSE = 0.01
+    
+    root = tk.Tk()
+    app = AutoClickerApp(root)
+    
+    # Run main loop
+    # System tray icon is created in __init__ if pystray is available
+    # User can minimize/close window, and target windows will persist
+    
+    root.mainloop()
+    
+    # Cleanup
+    if app.is_running:
+        app.stop_running()
+    if app.tray_icon:
+        app.tray_icon.stop()
 
 if __name__ == "__main__":
-    app = MainWindow()
-    app.run()
-
+    main()
