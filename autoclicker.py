@@ -270,7 +270,7 @@ class AutoclickerApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Autoclicker")
-        self.root.geometry("600x700")
+        self.root.geometry("800x700")
         
         self.scripts: List[Script] = []
         self.current_editing_script: Optional[Script] = None
@@ -415,6 +415,11 @@ class AutoclickerApp:
         # Duplicate button
         tk.Button(buttons_frame, text="Duplicate", 
                  command=lambda s=script: self._duplicate_script(s)).pack(side='left', padx=5)
+        
+        # Delete script button
+        tk.Button(buttons_frame, text="Delete Script", 
+                 command=lambda s=script: self._delete_script(s),
+                 bg='lightcoral', fg='white').pack(side='left', padx=5)
         
         # Return checkbox
         return_check_frame = tk.Frame(script.frame)
@@ -703,6 +708,29 @@ class AutoclickerApp:
         new_script = script.duplicate()
         self.scripts.append(new_script)
         self._update_scripts_ui()
+    
+    def _delete_script(self, script: Script):
+        """Delete a script."""
+        # Ask for confirmation
+        result = messagebox.askyesno("Delete Script", 
+                                    f"Are you sure you want to delete '{script.name}'?\n\nThis will remove all targets and cannot be undone.",
+                                    icon='warning')
+        if result:
+            # Destroy all target windows
+            for target in script.targets:
+                target.destroy()
+            
+            # Remove from scripts list
+            if script in self.scripts:
+                self.scripts.remove(script)
+            
+            # Clear editing reference if this was the editing script
+            if self.current_editing_script == script:
+                self.current_editing_script = None
+            
+            # Update UI
+            self._update_scripts_ui()
+            self.root.after_idle(self._update_scroll_region)
     
     def _toggle_run(self):
         """Toggle run mode."""
