@@ -369,7 +369,7 @@ class AutoclickerApp:
         name_entry.bind('<Return>', lambda e, s=script: self._update_script_name(s))
         
         # Save button for script name
-        save_name_btn = tk.Button(header_frame, text="Save", command=lambda s=script: self._update_script_name(s), 
+        save_name_btn = tk.Button(header_frame, text="Save Name", command=lambda s=script: self._update_script_name(s), 
                                  width=8, font=('Arial', 9))
         save_name_btn.pack(side='left', padx=5)
         
